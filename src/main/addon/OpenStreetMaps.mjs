@@ -23,7 +23,17 @@ class OpenStreetMaps extends Base {
          */
         className: 'Neo.main.addon.OpenStreetMaps',
 
-        interceptRemotes: ['create'],
+        interceptRemotes: [
+            'addMarker',
+            'destroyMarkers',
+            'hideMarker',
+            'panTo',
+            'removeMap',
+            'removeMarker',
+            'setCenter',
+            'setZoom',
+            'showMarker'
+        ],
         /**
          * @member {Object} remote
          * @protected
@@ -54,6 +64,11 @@ class OpenStreetMaps extends Base {
      */
     markers = {}
     /**
+     * @member {Object} pendingInits={}
+     * @protected
+     */
+    pendingInits = {}
+    /**
      * @member {Object} vectorLayers={}
      */
     vectorLayers = {}
@@ -72,8 +87,61 @@ class OpenStreetMaps extends Base {
      * @param {Object} data.position
      * @param {String} [data.title]
      */
-    addMarker(data) {
-        // TODO: Implement OpenLayers marker creation
+    addMarker(config, data) {
+        let me      = this,
+            {mapId} = config,
+            marker;
+
+        // Defensive check to prevent errors from stale/invalid remote calls.
+        // This is the critical fix.
+        if (!data.position) {
+            console.warn('OpenStreetMaps.addMarker() called with invalid data. Missing position.', {config, data});
+            return { success: false, error: 'Missing position data' };
+        }
+
+        // Create marker using OpenLayers
+        marker = new ol.Feature({
+            geometry: new ol.geom.Point([data.position.lng, data.position.lat]),
+            neoId: data.id,
+            label: data.label || '',
+            title: data.title || ''
+        });
+
+        // Set custom properties if provided
+        if (data.anchorPoint) {
+            marker.set('anchorPoint', data.anchorPoint);
+        }
+        if (data.icon) {
+            marker.set('icon', data.icon);
+        }
+
+        // IMPORTANT: Associate mapId with the feature for later cleanup
+        marker.set('mapId', mapId);
+
+        // Add the marker to the existing vector source
+        me.vectorSources[mapId].addFeature(marker);
+
+        // Store the marker in the markers object
+        me.markers[data.id] = marker;
+
+        // Fire an event for the app to listen to
+        me.fire('markerAdded', {
+            mapId: mapId,
+            marker: { // Return a plain object, not the ol.Feature
+                id: data.id
+            }
+        });
+
+        return {
+            success: true,
+            mapId  : mapId,
+            marker : {
+                id      : data.id,
+                position: data.position,
+                title   : data.title,
+                label   : data.label
+            }
+        };
     }
 
     /**
@@ -88,113 +156,93 @@ class OpenStreetMaps extends Base {
      * @param {Boolean} data.zoomControl
      */
     async create(data) {
-        let me = this,
-            {id: mapId} = data,
-            map;
+        let me   = this,
+            {id} = data,
+            map, resolvePromise;
 
-        // Ensure OpenLayers is loaded first (Remote Method Interception pattern)
+        me.pendingInits[id] = new Promise(resolve => {
+            resolvePromise = resolve;
+        });
+
+        // Ensure OpenLayers is loaded first
         if (!globalThis.ol) {
             await me.loadFiles();
         }
-        // Verify mapId is provided
-        if (!mapId) {
-            console.error(`Map ID is not provided`);
-            return;
-        }
 
-        // Before creating the map, verify element dimensions:
-        let mapElement = document.getElementById(mapId);
-        let styles = window.getComputedStyle(mapElement);
+        let mapElement = DomAccess.getElement(id);
 
         if (!mapElement) {
-            console.error(`Map container element with id "${mapId}" not found`);
-            return;
+            console.error('Cannot create map, element not found:', id);
+            resolvePromise({success: false, error: 'Target element not found'});
+            return; // Return here is fine, but the promise must be resolved.
         }
-        try {
-            const center = [data.center.lng, data.center.lat];
 
-            // Create the view configuration - no projection needed due to useGeographic()
-            let viewConfig = {
-                center: center,
-                zoom: data.zoom || 10,
-                minZoom: data.minZoom != undefined ? data.minZoom : 0,
-                maxZoom: data.maxZoom != undefined ? data.maxZoom : 28
-            };
+        // Create the vector source and layer for markers
+        me.vectorSources[id] = new ol.source.Vector();
+        me.vectorLayers[id]  = new ol.layer.Vector({
+            source: me.vectorSources[id],
+            style : (feature) => {
+                const icon = feature.get('icon');
 
-            // Create the view using CDN global object
-            let view = new ol.View(viewConfig);
+                if (feature.get('hidden') || !icon) {
+                    return null; // Hide feature if hidden or no icon is provided
+                }
+                // Handle icon as a URL string
+                if (typeof icon === 'string') {
+                    return new ol.style.Style({
+                        image: new ol.style.Icon({
+                            anchor: feature.get('anchorPoint') || [0.5, 1],
+                                                       src   : icon
+                        })
+                    });
+                }
 
-            // Create base tile layer (OpenStreetMap) using CDN global object
-            let tileLayer = new ol.layer.Tile({
-                source: new ol.source.OSM()
-            });
-
-            // Create controls array
-            let controls =[];
-            if (data.fullscreenControl) {
-                controls.push(new ol.control.FullScreen());
+                // Handle icon as a style object
+                if (typeof icon === 'object' && icon.shape === 'circle') {
+                    return new ol.style.Style({
+                        image: new ol.style.Circle({
+                            fill: new ol.style.Fill({
+                                color: icon.fillColor || 'blue'
+                            }),
+                            radius: icon.radius || 5,
+                            stroke: new ol.style.Stroke({
+                                color: icon.strokeColor || 'white',
+                                width: icon.strokeWidth || 1
+                            })
+                        })
+                    });
+                }
+                return me.getDefaultMarkerStyle(); // Fallback to default
             }
+        });
 
-            // // Create vector source and layer for markers using CDN global object
-            // let vectorSource = new ol.source.Vector();
-            // let vectorLayer = new ol.layer.Vector({
-            //     source: vectorSource,
-            //     style: me.getDefaultMarkerStyle()
-            // });
+        me.maps[id] = map = new ol.Map({
+            layers: [
+                new ol.layer.Tile({
+                    source: new ol.source.OSM()
+                }),
+                me.vectorLayers[id] // Add marker layer to the map
+            ],
+            target: mapElement,
+            view  : new ol.View({
+                center : [data.center.lng, data.center.lat],
+                maxZoom: data.maxZoom,
+                minZoom: data.minZoom,
+                zoom   : data.zoom
+            }),
+            ...data.mapOptions
+        });
 
-            // Store vector source and layer for later use
-            // me.vectorSources[mapId] = vectorSource;
-            // me.vectorLayers[mapId] = vectorLayer;
+        map.on('moveend', event => me.onMapZoomChange(map, id));
 
-            // Create the map using CDN global object
-            let map = new ol.Map({
-                controls: controls,
-                target: mapElement,
-                layers: [tileLayer],
-                view: view
+        // Add click listener for markers
+        map.on('click', event => {
+            map.forEachFeatureAtPixel(event.pixel, (feature, layer) => {
+                me.onMarkerClick(feature, event);
             });
+        });
 
-            // Add fullscreen control if requested
-            if (data.fullscreenControl) {
-                map.addControl(new ol.control.FullScreen());
-            }
-
-            // Store the map instance
-            me.maps[mapId] = map;
-            
-            // // Initialize markers object for this map
-            // Neo.ns(`${mapId}`, true, me.markers);
-
-            // Set up zoom change event listener
-            view.on('change:zoom', () => {
-                me.onMapZoomChange(map, mapId);
-            });
-
-            // Set up click event listener for markers
-            map.on('click', (event) => {
-                map.forEachFeatureAtPixel(event.pixel, (feature) => {
-                    if (feature.get('neoId')) {
-                        me.onMarkerClick(feature, event);
-                    }
-                });
-            });
-
-            // // Fire mapCreated event (similar to GoogleMaps addon)
-            // me.fire('mapCreated', mapId);
-
-            return {
-                success: true,
-                mapId: mapId
-            };
-
-        } catch (error) {
-            console.error(`Failed to create OpenStreetMaps map "${mapId}":`, error);
-            return {
-                success: false,
-                error: error.message,
-                mapId: mapId
-            };
-        }
+        resolvePromise({success: true});
     }
 
     /**
@@ -202,7 +250,20 @@ class OpenStreetMaps extends Base {
      * @param {String} data.mapId
      */
     destroyMarkers(data) {
-        // TODO: Implement marker destruction
+        let me           = this,
+            {mapId}      = data,
+            vectorSource = me.vectorSources[mapId];
+
+        if (vectorSource) {
+            vectorSource.clear();
+        }
+
+        // Clear out the markers object for the given mapId
+        Object.keys(me.markers).forEach(markerId => {
+            if (me.markers[markerId].get('mapId') === mapId) {
+                delete me.markers[markerId];
+            }
+        });
     }
 
     /**
@@ -213,7 +274,40 @@ class OpenStreetMaps extends Base {
      * @returns {Object}
      */
     async geocode(data) {
-        // TODO: Implement geocoding (likely using Nominatim or other service)
+        const {address, mapId} = data;
+        const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=5`;
+
+        try {
+            // Nominatim requires a User-Agent header.
+            const response = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Neo.mjs OpenStreetMaps Addon'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Nominatim API request failed with status ${response.status}`);
+            }
+
+            const results = await response.json();
+
+            const features = results.map(item => ({
+                id         : item.place_id,
+                displayName: item.display_name,
+                position   : {
+                    lat: parseFloat(item.lat),
+                    lng: parseFloat(item.lon)
+                },
+                boundingBox: item.boundingbox // [south, north, west, east]
+            }));
+
+            return {success: true, mapId, features};
+
+        } catch (error) {
+            console.error('Geocoding error:', error);
+            // Return an empty features array on error to prevent crashes in the calling component.
+            return {success: false, mapId, error: error.message, features: []};
+        }
     }
 
     /**
@@ -222,7 +316,21 @@ class OpenStreetMaps extends Base {
      * @param {String} data.mapId
      */
     hideMarker(data) {
-        // TODO: Implement marker hiding
+        let {id}   = data,
+            marker = this.markers[id];
+
+        if (marker) {
+            marker.set('hidden', true);
+
+            const mapId = marker.get('mapId');
+            if (mapId && this.vectorLayers[mapId]) {
+                // Force the layer to re-evaluate styles and re-render
+                this.vectorLayers[mapId].changed();
+            }
+            return {success: true};
+        }
+
+        return {success: false, error: 'Marker not found'};
     }
 
     /**
@@ -293,7 +401,21 @@ class OpenStreetMaps extends Base {
      * @param {Object} event
      */
     onMarkerClick(feature, event) {
-        // TODO: Handle marker click events
+        let me         = this,
+            coords     = feature.getGeometry().getCoordinates(),
+            featureId  = feature.get('neoId'),
+            mapId      = event.map.getTarget().id;
+
+        // Fire an event that the component instance can listen for.
+        // It's crucial to send a complete, serializable data object.
+        me.fire('markerClick', {
+            mapId   : mapId,
+            markerId: featureId,
+            position: {
+                lng: coords[0],
+                lat: coords[1]
+            }
+        });
     }
 
     /**
@@ -304,63 +426,14 @@ class OpenStreetMaps extends Base {
      * @param {Number} data.position.lng - Longitude
      * @param {Number} [data.duration] - Animation duration in milliseconds (default: 1000)
      */
-    panTo(data) {
-        let me = this,
-            {mapId, position, duration = 1000} = data;
+    async panTo(data) {
+        let {mapId, position, duration = 1000} = data,
+            map                               = this.maps[mapId];
 
-        if (!mapId || !me.maps[mapId]) {
-            console.error(`Map with id "${mapId}" not found`);
-            return {
-                success: false,
-                error: `Map with id "${mapId}" not found`
-            };
-        }
-
-        if (!position || (position.lat === undefined || position.lng === undefined )) {
-            console.error('Invalid position data. Expected object with lat and lng properties');
-            return {
-                success: false,
-                error: 'Invalid position data'
-            };
-        }
-
-        try {
-            let map = me.maps[mapId],
-                view = map.getView();
-
-            // Use position coordinates directly in [lng, lat] format
-            // we configured the projection to useGeographic() so that it expects lat/lng instead of the default mercator projection
-            let center = [position.lng, position.lat];
-
-            // Animate the pan
-            view.animate({
-                center: center,
-                duration: duration,
-                easing: ol.easing.easeOut
-            });
-
-            return {
-                success: true,
-                mapId: mapId,
-                position: position
-            };
-
-        } catch (error) {
-            console.error(`Failed to pan map "${mapId}":`, error);
-            return {
-                success: false,
-                error: error.message,
-                mapId: mapId
-            };
-        }
-    }
-
-    /**
-     * @param {Object} data
-     * @param {String} data.mapId
-     */
-    removeMap(data) {
-        // TODO: Implement map removal
+        map.getView().animate({
+            center  : [position.lng, position.lat],
+            duration: duration
+        });
     }
 
     /**
@@ -368,82 +441,63 @@ class OpenStreetMaps extends Base {
      * @param {String} data.id
      * @param {String} data.mapId
      */
-    removeMarker(data) {
-        // TODO: Implement marker removal
+    async removeMap(data) {
+        let {mapId} = data,
+            map     = this.maps[mapId];
+
+        if (map) {
+            map.setTarget(null);
+            delete this.maps[mapId];
+            delete this.vectorSources[mapId];
+            delete this.vectorLayers[mapId];
+            // Further cleanup if needed
+        }
     }
 
     /**
      * @param {Object} data
      * @param {String} data.id
+     * @param {String} data.mapId
+     */
+    async removeMarker(data) {
+        let {id, mapId} = data,
+            marker       = this.markers[id],
+            vectorSource = this.vectorSources[mapId];
+
+        if (marker && vectorSource) {
+            vectorSource.removeFeature(marker);
+            delete this.markers[id];
+        }
+    }
+
+    /**
+     * @param {Object} data
+     * @param {String} data.id
+     * @param {String} data.mapId
      * @param {Object} data.value
      */
-    setCenter(data) {
-        // TODO: Implement set center
+    async setCenter(data) {
+        let {id: mapId, value} = data,
+            map                = this.maps[mapId];
+
+        map.getView().setCenter([value.lng, value.lat]);
     }
 
     /**
      * @param {Object} data
-     * @param {String} data.id - Map ID (mapId)
+     * @param {String} data.id
+     * @param {String} data.mapId
      * @param {Number} data.value - The zoom level to set
      * @param {Number} [data.duration] - Animation duration in milliseconds (default: 1000)
      */
-    setZoom(data) {
-        let me = this,
-            {id: mapId, value: zoomLevel, duration = 1000} = data;
+    async setZoom(data) {
+        let {id: mapId, value, duration = 1000} = data,
+            map                                 = this.maps[mapId];
 
-        if (!mapId || !me.maps[mapId]) {
-            console.error(`Map with id "${mapId}" not found`);
-            return {
-                success: false,
-                error: `Map with id "${mapId}" not found`
-            };
-        }
-
-        if (zoomLevel === undefined || typeof zoomLevel !== 'number') {
-            console.error('Invalid zoom level. Expected a number');
-            return {
-                success: false,
-                error: 'Invalid zoom level'
-            };
-        }
-
-        try {
-            let map = me.maps[mapId],
-                view = map.getView(),
-                minZoom = view.getMinZoom(),
-                maxZoom = view.getMaxZoom();
-
-            // Validate zoom level is within bounds
-            if (minZoom !== undefined && zoomLevel < minZoom) {
-                console.warn(`Zoom level ${zoomLevel} is below minimum ${minZoom}, setting to minimum`);
-                zoomLevel = minZoom;
-            }
-            if (maxZoom !== undefined && zoomLevel > maxZoom) {
-                console.warn(`Zoom level ${zoomLevel} is above maximum ${maxZoom}, setting to maximum`);
-                zoomLevel = maxZoom;
-            }
-
-            // Animate the zoom change
-            view.animate({
-                zoom: zoomLevel,
-                duration: duration,
-                easing: ol.easing.easeOut
-            });
-
-            return {
-                success: true,
-                mapId: mapId,
-                zoom: zoomLevel
-            };
-
-        } catch (error) {
-            console.error(`Failed to set zoom for map "${mapId}":`, error);
-            return {
-                success: false,
-                error: error.message,
-                mapId: mapId
-            };
-        }
+        map.getView().animate({
+            zoom    : value,
+            duration: duration
+        });
     }
 
     /**
@@ -452,7 +506,21 @@ class OpenStreetMaps extends Base {
      * @param {String} data.mapId
      */
     showMarker(data) {
-        // TODO: Implement marker showing
+        let {id}   = data,
+            marker = this.markers[id];
+
+        if (marker) {
+            marker.set('hidden', false);
+
+            const mapId = marker.get('mapId');
+            if (mapId && this.vectorLayers[mapId]) {
+                // Force the layer to re-evaluate styles and re-render
+                this.vectorLayers[mapId].changed();
+            }
+            return {success: true};
+        }
+
+        return {success: false, error: 'Marker not found'};
     }
 
     /**
@@ -475,6 +543,25 @@ class OpenStreetMaps extends Base {
                 `)
             })
         });
+    }
+
+    /**
+     * Intercepts remote method calls to ensure proper initialization order
+     * @param {String} remote
+     * @param {Object} data
+     * @returns {Promise<any>}
+     */
+    async interceptRemote(remote, data) {
+        let me    = this,
+            mapId = data.mapId || data.id;
+
+        // For methods that depend on a map, wait for it to be initialized.
+        if (mapId && !me.maps[mapId]) {
+            await me.pendingInits[mapId];
+        }
+
+        // Proceed with the original method call
+        return me[remote](data);
     }
 }
 

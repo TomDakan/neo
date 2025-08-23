@@ -7,71 +7,27 @@ import MarkerDialog        from './MarkerDialog.mjs';
  */
 class MapComponent extends OpenStreetMapsComponent {
     static config = {
-        /**
-         * @member {String} className='Neo.examples.component.wrapper.OpenStreetMaps.MapComponent'
-         * @protected
-         */
-        className: 'Neo.examples.component.wrapper.OpenStreetMaps.MapComponent',
-        /**
-         * Center the map initially to Iceland
-         * @member {Object} center={lat: 64.963051,lng: -19.020835}
-         * @reactive
-         */
+        className: 'Neo.examples.component.wrapper.openStreetMaps.MapComponent',
         center: {
-            lng: -19.020835,
-            lat: 64.963051
+            lat: 64.963051,
+            lng: -19.020835
         },
-        /**
-         * Adding a record field
-         * @member {Object} markerStore
-         * @protected
-         */
-        markerStore: {
-            model: {
-                fields: [{
-                    name: 'anchorPoint',
-                    type: 'Object'
-                }, {
-                    name: 'icon',
-                    type: 'Object'
-                }, {
-                    name: 'id'
-                }, {
-                    name: 'label',
-                    type: 'String'
-                }, {
-                    name: 'position',
-                    type: 'Object'
-                }, {
-                    name: 'record',
-                    type: 'Object'
-                }, {
-                    name: 'title',
-                    type: 'String'
-                }]
-            }
+        // The markerStoreConfig should only specify what is unique to this instance,
+        // like the URL. The model definition should be inherited from the wrapper.
+        markerStoreConfig: {
+            url: './earthquakes.json'
         },
-        /**
-         * Limit zoom to prevent over-zooming beyond useful detail
-         * @member {Number} maxZoom=18
-         * @reactive
-         */
-        maxZoom: 18,
-        /**
-         * Ensure only Iceland is visible
-         * @member {Number} zoom=6
-         * @reactive
-         */
         zoom: 6
     }
 
     /**
-     * @param {Object} config
+     * The onConstructed method is the correct lifecycle hook to trigger
+     * data loading, as it runs after the parent component has created
+     * all necessary instances, like the markerStore.
      */
-    construct(config) {
-        super.construct(config);
-
-        this.fetchData()
+    onConstructed() {
+        super.onConstructed();
+        this.fetchData();
     }
 
     /**
@@ -101,52 +57,23 @@ class MapComponent extends OpenStreetMapsComponent {
                 year  : 'numeric'
             });
 
-            icon = this.getIcon(undefined, undefined, record.size);
-
+            // Create a style object for the marker.
+            // The addon will use this to render a dynamic circle.
+            icon = {
+                shape    : 'circle',
+                fillColor: 'rgba(255, 20, 20, 0.5)',
+                radius   : Math.max(5, record.size * 5) // Dynamic radius based on earthquake size
+            };
             // Create a single Marker
             return {
                 icon,
-                position: {lng: record.longitude, lat: record.latitude}, //openlayers expects lng/lat
+                position: {lat: record.latitude, lng: record.longitude}, //openlayers expects lng/lat
                 record,
                 title   : `${date}, ${record.humanReadableLocation}`
             }
         });
 
-        this.markerStore.add(markers)
-    }
-    //TODO this might be an AI hallucination
-    /**
-     * osm.maps.SymbolPaths are not available in the worker.
-     * Therefore, we are solving it here
-     * @param {String} symbol
-     * @returns {Number}
-     */
-    getType(symbol) {
-        return {
-            'CIRCLE'               : 0,
-            'FORWARD_CLOSED_ARROW' : 1,
-            'FORWARD_OPEN_ARROW'   : 2,
-            'BACKWARD_CLOSED_ARROW': 3,
-            'BACKWARD_OPEN_ARROW'  : 4
-        }[symbol]
-    }
-
-    /**
-     * Create an icon based on color, symbol and size
-     * @param {String} color=red
-     * @param {'CIRCLE' | 'FORWARD_CLOSED_ARROW' | 'FORWARD_OPEN_ARROW' | 'BACKWARD_CLOSED_ARROW' | 'BACKWARD_OPEN_ARROW'} [symbol=CIRCLE]
-     * @param {Number} scaleMultiplier=1
-     * @returns {{fillColor: string, path: Number, fillOpacity: number, strokeWeight: number, scale: number, strokeColor: string}}
-     */
-    getIcon(color='red', symbol='CIRCLE', scaleMultiplier=1) {
-        return {
-            fillColor   : color,
-            fillOpacity : 1.0,
-            path        : this.getType(symbol),
-            scale       : 10 * scaleMultiplier,
-            strokeColor : `dark${color}`,
-            strokeWeight: 2
-        }
+        this.markerStore.add(markers);
     }
 
     /**
@@ -167,7 +94,7 @@ class MapComponent extends OpenStreetMapsComponent {
             listeners: {
                 close: () => me.disabled = false
             }
-        })
+        });
     }
 }
 

@@ -7,6 +7,7 @@ import Store           from '../../data/Store.mjs';
  * @extends Neo.component.Base
  */
 class OpenStreetMaps extends Base {
+
     static config = {
         /**
          * @member {String} className='Neo.component.wrapper.OpenStreetMaps'
@@ -25,38 +26,68 @@ class OpenStreetMaps extends Base {
          */
         center_: {lat: -34.397, lng: 150.644},
         /**
-         * Prefer to use markerStoreConfig instead.
+         * The store containing the marker data.
          * @member {Neo.data.Store|Object} markerStore_
          * @protected
          * @reactive
          */
         markerStore_: {
+            autoLoad: false,
             model: {
                 fields: [{
-                    name: 'anchorPoint',
-                    type: 'Object'
-                }, {
-                    name: 'icon',
-                    type: 'Object'
-                }, {
                     name: 'id'
                 }, {
-                    name: 'label',
-                    type: 'String'
+                    name: 'humanReadableLocation',
+                    mapping: 'humanReadableLocation'
+                }, {
+                    name: 'latitude',
+                    mapping: 'latitude'
+                }, {
+                    name: 'longitude',
+                    mapping: 'longitude'
                 }, {
                     name: 'position',
-                    type: 'Object'
+                    convert(value, record) {
+                        return {
+                            lat: record.data.latitude,
+                            lng: record.data.longitude
+                        }
+                    }
+                }, {
+                    name: 'timestamp',
+                    mapping: 'timestamp'
                 }, {
                     name: 'title',
-                    type: 'String'
+                    convert(value, record) {
+                        return `${new Date(record.data.timestamp).toLocaleDateString()}, ${record.data.humanReadableLocation}`
+                    }
                 }]
+            },
+            proxy: {
+                reader: {
+                    rootProperty: 'results'
+                }
             }
         },
         /**
-         * @member {Number} zoom_=8
-         * @reactive
+         * @member {Object|null} markerStoreConfig=null
          */
-        zoom_: 8
+        markerStoreConfig: null,
+        /**
+         * null => the maximum zoom from the current map type is used instead
+         * @member {Number|null} maxZoom=null
+         */
+        maxZoom: null,
+        /**
+         null => the minimum zoom from the current map type is used instead
+         * @member {Number|null} minZoom=null
+         */
+        minZoom: null,
+        /**
+         * false hides the default zoom control
+         * @member {Boolean} zoomControl=true
+         */
+        zoomControl: true
     }
 
     /**
@@ -75,24 +106,9 @@ class OpenStreetMaps extends Base {
      */
     mapOptions = {}
     /**
-     * @member {Object} markerStoreConfig=null
+     * @member {Number|null} zoom=12
      */
-    markerStoreConfig = null
-    /**
-     * null => the maximum zoom from the current map type is used instead
-     * @member {Number|null} maxZoom=null
-     */
-    maxZoom = null
-    /**
-     null => the minimum zoom from the current map type is used instead
-     * @member {Number|null} minZoom=null
-     */
-    minZoom = null
-    /**
-     * false hides the default zoom control
-     * @member {Boolean} zoomControl=true
-     */
-    zoomControl = true
+    zoom = 12
 
     /**
      * @param {Object} config
@@ -103,69 +119,11 @@ class OpenStreetMaps extends Base {
         let me = this;
 
         me.addDomListeners({
-            openStreetMapZoomChange: me.onMapZoomChange,
-            openStreetMapMarkerClick  : me.parseMarkerClick,
-            local              : false,
-            scope              : me
-        })
-    }
-
-    /**
-     * @param {Object} data
-     * @param {Object} [data.anchorPoint] x & y
-     * @param {String} [data.icon]
-     * @param {String} data.id
-     * @param {String} [data.label]
-     * @param {String} data.mapId
-     * @param {Object} data.position
-     * @param {String} [data.title]
-     */
-    addMarker(data) {
-        let {appName, windowId} = this;
-
-        Neo.main.addon.OpenStreetMaps.addMarker({
-            appName,
-            windowId,
-            ...data
-        })
-    }
-
-    /**
-     * Triggered after the center config got changed
-     * @param {Object} value
-     * @param {Object} oldValue
-     * @protected
-     */
-    afterSetCenter(value, oldValue) {
-        let {appName, id, windowId} = this;
-
-        if (this.mapCreated) {
-            Neo.main.addon.OpenStreetMaps.setCenter({
-                appName,
-                id,
-                value,
-                windowId
-            })
-        }
-    }
-
-    /**
-     * Triggered after the markerStore config got changed
-     * @param {Object} value
-     * @param {Object} oldValue
-     * @protected
-     */
-    afterSetMarkerStore(value, oldValue) {
-        let me = this;
-
-        value.on({
-            load : me.onMarkerStoreLoad,
-            scope: me
+            omsMapZoomChange : me.onMapZoomChange,
+            omsMarkerClick   : me.parseMarkerClick,
+            local            : false,
+            scope            : me
         });
-
-        if (value.items.length > 0) {
-            me.onMarkerStoreLoad()
-        }
     }
 
     /**
@@ -175,17 +133,13 @@ class OpenStreetMaps extends Base {
      * @protected
      */
     afterSetMounted(value, oldValue) {
-        let me = this;
-
-        if (value === false && oldValue !== undefined) {
-            me.removeMap()
-        }
-
         super.afterSetMounted(value, oldValue);
 
         if (value) {
-            let opts = {
-                appName          : me.appName,
+            let me = this;
+            me.loader = true;
+
+            Neo.main.addon.OpenStreetMaps.create({
                 center           : me.center,
                 fullscreenControl: me.fullscreenControl,
                 id               : me.id,
@@ -194,15 +148,46 @@ class OpenStreetMaps extends Base {
                 minZoom          : me.minZoom,
                 zoom             : me.zoom,
                 zoomControl      : me.zoomControl
-            };
+            }).then(() => {
+                me.mapCreated = true;
+                me.loader = false;
 
-            me.timeout(50).then(() => {
-                Neo.main.addon.OpenStreetMaps.create(opts).then(() => {
-                    me.mapCreated = true;
-                    me.onComponentMounted()
-                })
-            })
+                if (me.markerStore?.proxy?.url) {
+                    me.markerStore.load();
+                }
+            }).catch(e => {
+                console.error('Error during map setup', e);
+                me.loader = false;
+            });
         }
+    }
+
+    /**
+     * Triggered after the center config got changed
+     * @param {Object} value
+     * @param {Object} oldValue
+     * @protected
+     */
+    afterSetCenter(value, oldValue) {
+        if (this.mounted && value) {
+            Neo.main.addon.OpenStreetMaps.setCenter({
+                id   : this.id,
+                value: value
+            });
+        }
+    }
+
+    /**
+     * Triggered after the markerStore config gets changed.
+     * @param {Neo.data.Store} value
+     * @param {Neo.data.Store} oldValue
+     * @protected
+     */
+    afterSetMarkerStore(value, oldValue) {
+        value.on({
+            load : this.onMarkerStoreLoad,
+            scope: this
+        });
     }
 
     /**
@@ -212,21 +197,14 @@ class OpenStreetMaps extends Base {
      * @protected
      */
     afterSetZoom(value, oldValue) {
-        let me                      = this,
-            {appName, id, windowId} = me;
-
-        if (me.mapCreated) {
+        if (this.mounted && value) {
             Neo.main.addon.OpenStreetMaps.setZoom({
-                appName,
-                id,
-                value,
-                windowId
+                id   : this.id,
+                value: value
             });
-
-            me.fire('zoomChange', {id, value})
         }
     }
-
+    
     /**
      * Triggered before the markerStore config gets changed.
      * @param {Object} value
@@ -236,7 +214,23 @@ class OpenStreetMaps extends Base {
     beforeSetMarkerStore(value, oldValue) {
         oldValue?.destroy();
 
-        return ClassSystemUtil.beforeSetInstance(value, Store, this.markerStoreConfig)
+        if (value?.isStore) {
+            return value;
+        }
+
+        const storeConfig = Neo.merge(
+            Neo.clone(this.markerStore_),
+            this.markerStoreConfig,
+            value || {}
+        );
+
+        if (storeConfig.url) {
+            storeConfig.proxy = storeConfig.proxy || {};
+            storeConfig.proxy.url = storeConfig.url;
+            delete storeConfig.url;
+        }
+
+        return Neo.create(Store, storeConfig);
     }
 
     /**
@@ -249,26 +243,6 @@ class OpenStreetMaps extends Base {
     }
 
     /**
-     * @param {String} id
-     */
-    hideMarker(id) {
-        let {appName, windowId} = this;
-
-        Neo.main.addon.OpenStreetMaps.hideMarker({
-            appName,
-            id,
-            mapId: this.id,
-            windowId
-        })
-    }
-
-    /**
-     * Hook to use once the map instance got rendered
-     */
-    onComponentMounted() {
-    }
-
-    /**
      * @param {Object} data
      */
     onMapZoomChange(data) {
@@ -276,41 +250,21 @@ class OpenStreetMaps extends Base {
     }
 
     /**
-     *
+     * Gets triggered when the markerStore loads.
+     * @param {Neo.data.Store} store The store instance
      */
-    onMarkerStoreLoad() {
-        let {appName, id, windowId} = this;
+    onMarkerStoreLoad(store) {
+        if (this.mapCreated) {
+            let me = this;
 
-        Neo.main.addon.OpenStreetMaps.destroyMarkers({
-            appName,
-            id,
-            windowId
-        });
-
-        this.markerStore.items.forEach(item => {
-            Neo.main.addon.OpenStreetMaps.addMarker({
-                appName,
-                mapId: id,
-                windowId,
-                ...item
-            })
-        })
-    }
-
-    /**
-     * @param {Object} position
-     * @param {Number} position.lat
-     * @param {Number} position.lng
-     */
-    panTo(position) {
-        let {appName, id, windowId} = this;
-
-        Neo.main.addon.OpenStreetMaps.panTo({
-            appName,
-            mapId: id,
-            position,
-            windowId
-        })
+            store.items.forEach(record => {
+                Neo.main.addon.OpenStreetMaps.addMarker({
+                    appName : me.appName,
+                    mapId   : me.id,
+                    windowId: me.windowId
+                }, record.data);
+            });
+        }
     }
 
     /**
@@ -337,34 +291,6 @@ class OpenStreetMaps extends Base {
         Neo.main.addon.OpenStreetMaps.removeMap({
             appName,
             mapId: id,
-            windowId
-        })
-    }
-
-    /**
-     * @param {String} id
-     */
-    removeMarker(id) {
-        let {appName, windowId} = this;
-
-        Neo.main.addon.OpenStreetMaps.removeMarker({
-            appName,
-            id,
-            mapId: this.id,
-            windowId
-        })
-    }
-
-    /**
-     * @param {String} id
-     */
-    showMarker(id) {
-        let {appName, windowId} = this;
-
-        Neo.main.addon.OpenStreetMaps.showMarker({
-            appName,
-            id,
-            mapId: this.id,
             windowId
         })
     }
